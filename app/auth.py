@@ -10,22 +10,19 @@ from sqlalchemy.future import select
 from app.database import get_db
 from app.schemas import UserDB
 
-# Конфигурация JWT
-SECRET_KEY = "your-secret-key-change-in-production"
+SECRET_KEY = "key_123456"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 120
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 def get_password_hash(password: str) -> str:
-    # Обрезаем пароль до 72 символов для bcrypt
     if len(password) > 72:
         password = password[:72]
     return pwd_context.hash(password)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    # Обрезаем пароль до 72 символов для bcrypt
     if len(plain_password) > 72:
         plain_password = plain_password[:72]
     return pwd_context.verify(plain_password, hashed_password)
@@ -93,3 +90,9 @@ async def get_current_admin_user(
             detail="Недостаточно прав"
         )
     return current_user
+
+async def get_user_by_id(db: AsyncSession, user_id: int):
+    result = await db.execute(
+        select(UserDB).where(UserDB.id == user_id)
+    )
+    return result.scalar_one_or_none()

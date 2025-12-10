@@ -62,9 +62,6 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
-class TokenData(BaseModel):
-    username: Optional[str] = None
-
 class ReviewBase(BaseModel):
     movie_id: int
     rating: int = Field(..., ge=1, le=5)
@@ -80,3 +77,7 @@ class ReviewResponse(ReviewBase):
     
     class Config:
         from_attributes = True
+
+class ReviewUpdate(BaseModel):
+    rating: Optional[int] = Field(None, ge=1, le=5)
+    comment: Optional[str] = Field(None, max_length=1000)

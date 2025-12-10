@@ -5,565 +5,146 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from datetime import timedelta
 import os
-
 from app import models, auth, crud
 from app.database import get_db, init_db
+from app.routes import router as user_router
 from sqlalchemy.ext.asyncio import AsyncSession
 
-app = FastAPI(
-    title="Movie Rating API",
-    description="API для учета просмотренных фильмов с рейтингами и отзывами",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+app = FastAPI()
 
-# Создаем директорию для статических файлов
+app.include_router(user_router)
+
 os.makedirs("static/uploads", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Инициализация БД при старте
-# Инициализация БД при старте
-# Инициализация БД при старте
 @app.on_event("startup")
 async def startup_event():
     await init_db()
-    
-    # Создаем администратора при первом запуске
-    async for db in get_db():
-        try:
-            admin = await crud.create_admin_user(db)
-            print(f"✅ Администратор создан: {admin.username}")
-            await db.close()  # Явно закрываем сессию
-            break
-        except Exception as e:
-            print(f"⚠️ Администратор уже существует или ошибка: {e}")
-            await db.close()  # Явно закрываем сессию
-            break
 
-# ============ Главная страница ============
-@app.get("/", response_class=HTMLResponse, summary="Главная страница")
+@app.get("/", response_class=HTMLResponse)
 async def home():
     return HTMLResponse("""
     <html>
         <head>
-            <title>Movie Rating API</title>
-            <style>
-                body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-                h1 { color: #333; }
-                .endpoint { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
-                .method { display: inline-block; padding: 5px 10px; border-radius: 3px; color: white; font-weight: bold; }
-                .get { background: #61affe; }
-                .post { background: #49cc90; }
-                .put { background: #fca130; }
-                .delete { background: #f93e3e; }
-            </style>
-        </head>
-        <body>
-            <h1>🎬 Movie Rating API</h1>
-            <p>Добро пожаловать в систему учета фильмов с рейтингами и отзывами!</p>
-            
-            <h2>🔑 Аутентификация</h2>
-            <div class="endpoint">
-                <span class="method get">GET</span> <strong><a href="/register-page">/auth/register</a></strong> - Форма регистрации
-            </div>
-            <div class="endpoint">
-                <span class="method post">POST</span> <strong>/auth/register</strong> - Регистрация (API)
-            </div>
-            <div class="endpoint">
-                <span class="method get">GET</span> <strong><a href="/login-page">/auth/login</a></strong> - Форма входа
-            </div>
-            <div class="endpoint">
-                <span class="method post">POST</span> <strong>/auth/login</strong> - Вход (API)
-            </div>
-            
-            <h2>🎥 Фильмы</h2>
-            <div class="endpoint">
-                <span class="method get">GET</span> <strong>/movies/</strong> - Все фильмы
-            </div>
-            <div class="endpoint">
-                <span class="method get">GET</span> <strong>/movies/{id}</strong> - Фильм по ID
-            </div>
-            
-            <h2>⭐ Отзывы</h2>
-            <div class="endpoint">
-                <span class="method post">POST</span> <strong>/reviews/</strong> - Добавить отзыв
-            </div>
-            
-            <h2>👑 Админ-панель</h2>
-            <p><a href="/admin-panel">Перейти в админ-панель</a></p>
-            
-            <h2>📚 Документация</h2>
-            <ul>
-                <li><a href="/docs">Swagger UI документация</a></li>
-                <li><a href="/redoc">ReDoc документация</a></li>
-            </ul>
-            
-            <script>
-                // Проверка авторизации
-                const token = localStorage.getItem('access_token');
-                if (token) {
-                    try {
-                        const payload = JSON.parse(atob(token.split('.')[1]));
-                        document.body.innerHTML += '<p style="color: green;">✓ Вы авторизованы как: ' + payload.sub + '</p>';
-                    } catch (e) {
-                        console.log('Ошибка декодирования токена');
-                    }
-                }
-            </script>
-        </body>
-    </html>
-    """)
-
-# ============ HTML формы для регистрации и входа ============
-@app.get("/auth/register", response_class=HTMLResponse, summary="Форма регистрации")
-async def register_form():
-    return RedirectResponse(url="/register-page")
-
-@app.get("/auth/login", response_class=HTMLResponse, summary="Форма входа")
-async def login_form():
-    return RedirectResponse(url="/login-page")
-
-# ============ Аутентификация (API) ============
-@app.post("/auth/register", response_model=models.UserResponse, summary="Регистрация")
-async def register(user: models.UserCreate, db: AsyncSession = Depends(get_db)):
-    """Регистрация нового пользователя"""
-    return await crud.create_user(db, user)
-
-@app.post("/auth/login", response_model=models.Token, summary="Вход")
-async def login(user_data: models.UserLogin, db: AsyncSession = Depends(get_db)):
-    """Вход в систему. Возвращает JWT токен."""
-    user = await auth.authenticate_user(db, user_data.username, user_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверное имя пользователя или пароль",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Обновляем время последнего входа
-    from datetime import datetime
-    user.last_login = datetime.utcnow()
-    await db.commit()
-    
-    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = auth.create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
-    )
-    
-    return {"access_token": access_token, "token_type": "bearer"}
-
-# ============ Фильмы (публичные) ============
-@app.get("/movies/", response_model=List[models.MovieResponse], summary="Все фильмы")
-async def read_movies(
-    skip: int = Query(0, ge=0, description="Пропустить N записей"),
-    limit: int = Query(100, ge=1, le=100, description="Лимит записей"),
-    genre: Optional[str] = Query(None, description="Фильтр по жанру"),
-    min_rating: Optional[float] = Query(None, ge=0.0, le=10.0, description="Минимальный рейтинг"),
-    db: AsyncSession = Depends(get_db)
-):
-    """Получить список всех фильмов с фильтрацией"""
-    return await crud.get_movies(db, skip=skip, limit=limit, genre=genre, min_rating=min_rating)
-
-@app.get("/movies/{movie_id}", response_model=models.MovieResponse, summary="Фильм по ID")
-async def read_movie(movie_id: int, db: AsyncSession = Depends(get_db)):
-    """Получить информацию о конкретном фильме"""
-    return await crud.get_movie(db, movie_id)
-
-# ============ Отзывы ============
-@app.post("/reviews/", response_model=models.ReviewResponse, summary="Добавить отзыв")
-async def create_review(
-    review: models.ReviewCreate,
-    current_user = Depends(auth.get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """Добавить отзыв на фильм (требует авторизации)"""
-    return await crud.create_review(db, review, current_user.id)
-
-@app.get("/reviews/", response_model=List[models.ReviewResponse], summary="Получить отзывы")
-async def read_reviews(
-    movie_id: Optional[int] = Query(None, description="ID фильма"),
-    skip: int = Query(0, ge=0, description="Пропустить N записей"),
-    limit: int = Query(100, ge=1, le=100, description="Лимит записей"),
-    db: AsyncSession = Depends(get_db)
-):
-    """Получить список отзывов с фильтрацией по фильму"""
-    if movie_id:
-        return await crud.get_movie_reviews(db, movie_id)
-    # Если не указан movie_id, возвращаем все отзывы (с пагинацией)
-    from sqlalchemy.future import select
-    from app.schemas import ReviewDB
-    result = await db.execute(
-        select(ReviewDB).offset(skip).limit(limit)
-    )
-    return result.scalars().all()
-
-# ============ Админ-панель (CRUD для фильмов) ============
-@app.post("/admin/movies/", response_model=models.MovieResponse, summary="Добавить фильм (админ)")
-async def admin_create_movie(
-    title: str = Form(...),
-    director: str = Form(...),
-    year: Optional[int] = Form(None),
-    genre: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    duration: Optional[int] = Form(None),
-    cost: float = Form(0.0),
-    is_recommended: bool = Form(False),
-    photo: Optional[UploadFile] = File(None),
-    current_user = Depends(auth.get_current_admin_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """Добавить новый фильм (требуются права администратора)"""
-    movie_data = models.MovieCreate(
-        title=title,
-        director=director,
-        year=year,
-        genre=genre,
-        description=description,
-        duration=duration,
-        cost=cost,
-        is_recommended=is_recommended
-    )
-    
-    return await crud.create_movie(db, movie_data, current_user.id, photo)
-
-@app.put("/admin/movies/{movie_id}", response_model=models.MovieResponse, summary="Обновить фильм (админ)")
-async def admin_update_movie(
-    movie_id: int,
-    title: Optional[str] = Form(None),
-    director: Optional[str] = Form(None),
-    year: Optional[int] = Form(None),
-    genre: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    duration: Optional[int] = Form(None),
-    cost: Optional[float] = Form(None),
-    is_recommended: Optional[bool] = Form(None),
-    photo: Optional[UploadFile] = File(None),
-    current_user = Depends(auth.get_current_admin_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """Обновить информацию о фильме (требуются права администратора)"""
-    update_data = {}
-    if title is not None: update_data["title"] = title
-    if director is not None: update_data["director"] = director
-    if year is not None: update_data["year"] = year
-    if genre is not None: update_data["genre"] = genre
-    if description is not None: update_data["description"] = description
-    if duration is not None: update_data["duration"] = duration
-    if cost is not None: update_data["cost"] = cost
-    if is_recommended is not None: update_data["is_recommended"] = is_recommended
-    
-    movie_update = models.MovieUpdate(**update_data)
-    return await crud.update_movie(db, movie_id, movie_update, photo)
-
-@app.delete("/admin/movies/{movie_id}", summary="Удалить фильм (админ)")
-async def admin_delete_movie(
-    movie_id: int,
-    current_user = Depends(auth.get_current_admin_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """Удалить фильм (требуются права администратора)"""
-    return await crud.delete_movie(db, movie_id)
-
-# ============ HTML интерфейсы ============
-@app.get("/admin-panel", response_class=HTMLResponse, summary="Панель администратора")
-async def admin_panel():
-    return HTMLResponse("""
-    <html>
-        <head>
-            <title>Панель администратора</title>
+            <title>Movie Tracker API</title>
             <style>
                 body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
-                .section { margin: 30px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
-                table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-                th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
-                th { background: #f5f5f5; }
-                input, textarea { width: 100%; padding: 8px; margin: 5px 0; }
-                button { background: #49cc90; color: white; padding: 10px 20px; border: none; cursor: pointer; margin: 10px 5px; }
-                .delete-btn { background: #f93e3e; }
+                h1 { color: #333; }
+                .nav { 
+                    margin: 20px 0; 
+                    display: flex; 
+                    gap: 10px; 
+                    white-space: nowrap;
+                    justify-content: flex-start;
+                }
+                .nav a { 
+                    padding: 8px 15px; 
+                    background: #3498db; 
+                    color: white; 
+                    text-decoration: none; 
+                    border-radius: 4px; 
+                    display: inline-block;
+                    flex-shrink: 0;
+                }
+                .logout-btn { background: #e74c3c; }
+                .movie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; margin: 20px 0; }
+                .movie-card { border: 1px solid #ddd; padding: 15px; border-radius: 5px; }
+                .movie-card img { max-width: 100%; height: 150px; object-fit: cover; }
             </style>
         </head>
         <body>
-            <h1>🎬 Панель администратора</h1>
+            <h1>Movie Tracker API</h1>
+            <p>Система учета фильмов с рейтингами и отзывами</p>
             
-            <div id="authInfo"></div>
-            
-            <div class="section">
-                <h2>➕ Добавить фильм</h2>
-                <form id="addMovieForm" enctype="multipart/form-data">
-                    <input type="text" name="title" placeholder="Название" required>
-                    <input type="text" name="director" placeholder="Режиссёр" required>
-                    <input type="number" name="year" placeholder="Год">
-                    <input type="text" name="genre" placeholder="Жанр">
-                    <textarea name="description" placeholder="Описание" rows="3"></textarea>
-                    <input type="number" name="duration" placeholder="Длительность (минут)">
-                    <input type="number" name="cost" placeholder="Бюджет" step="0.01">
-                    <label><input type="checkbox" name="is_recommended"> Рекомендуется</label>
-                    <input type="file" name="photo" accept="image/*">
-                    <button type="submit">Добавить</button>
-                </form>
-                <div id="message"></div>
+            <div class="nav">
+                <a href="/login-page">Войти</a>
+                <a href="/register-page">Зарегистрироваться</a>
+                <a href="/my-movies-page">Мои фильмы</a>
+                <a href="/movies-page">Все фильмы</a>
+                <a href="/docs">Документация API</a>
+                <a href="#" onclick="logout()" class="logout-btn">Выйти</a>
             </div>
-            
-            <div class="section">
-                <h2>📋 Список фильмов</h2>
-                <div id="moviesList">Загрузка...</div>
-            </div>
-            
-            <div class="section">
-                <h2>⭐ Управление отзывами</h2>
-                <div id="reviewsList">Загрузка отзывов...</div>
-            </div>
-            
-            <p><a href="/">На главную</a></p>
             
             <script>
-                // Проверка авторизации
-                const token = localStorage.getItem('access_token');
-                const authInfo = document.getElementById('authInfo');
-                
-                if (!token) {
-                    authInfo.innerHTML = '<p style="color: red;">❌ Вы не авторизованы. <a href="/login-page">Войдите</a></p>';
-                } else {
+                function isTokenExpired(token) {
                     try {
                         const payload = JSON.parse(atob(token.split('.')[1]));
-                        authInfo.innerHTML = `<p style="color: green;">✓ Авторизован как: ${payload.sub}</p>`;
-                        loadMovies();
-                        loadReviews();
+                        const exp = payload.exp * 1000;
+                        const now = Date.now();
+                        return now >= exp;
                     } catch (e) {
-                        authInfo.innerHTML = '<p style="color: red;">❌ Неверный токен</p>';
+                        return true;
                     }
                 }
                 
-                // Загрузка фильмов
-                async function loadMovies() {
+                const token = localStorage.getItem('access_token');
+                if (token && !isTokenExpired(token)) {
                     try {
-                        const response = await fetch('/movies/?limit=50');
-                        if (!response.ok) throw new Error('Ошибка загрузки');
-                        const movies = await response.json();
-                        
-                        let html = '<table><tr><th>ID</th><th>Название</th><th>Режиссёр</th><th>Рейтинг</th><th>Действия</th></tr>';
-                        
-                        movies.forEach(movie => {
-                            html += `
-                                <tr>
-                                    <td>${movie.id}</td>
-                                    <td>${movie.title}</td>
-                                    <td>${movie.director}</td>
-                                    <td>${movie.rating?.toFixed(1) || '0.0'}</td>
-                                    <td>
-                                        <button onclick="deleteMovie(${movie.id})" class="delete-btn">Удалить</button>
-                                    </td>
-                                </tr>
-                            `;
-                        });
-                        
-                        html += '</table>';
-                        document.getElementById('moviesList').innerHTML = html;
-                    } catch (error) {
-                        document.getElementById('moviesList').innerHTML = '<p style="color: red;">Ошибка загрузки фильмов</p>';
-                    }
+                        const payload = JSON.parse(atob(token.split('.')[1]));
+                        document.body.innerHTML += '<p style="color: green; padding: 10px; background: #f0f8f0; border-radius: 4px;">Вы авторизованы как: ' + payload.sub + '</p>';
+                    } catch (e) {}
+                } else if (token && isTokenExpired(token)) {
+                    localStorage.removeItem('access_token');
+                    document.body.innerHTML += '<p style="color: red; padding: 10px; background: #f8d7da; border-radius: 4px;">Сессия истекла. Пожалуйста, войдите снова.</p>';
                 }
                 
-                // Загрузка отзывов
-                async function loadReviews() {
-                    try {
-                        const response = await fetch('/reviews/');
-                        if (!response.ok) throw new Error('Ошибка загрузки');
-                        const reviews = await response.json();
-                        
-                        let html = '<table><tr><th>ID</th><th>Фильм ID</th><th>Пользователь ID</th><th>Рейтинг</th><th>Комментарий</th></tr>';
-                        
-                        reviews.forEach(review => {
-                            html += `
-                                <tr>
-                                    <td>${review.id}</td>
-                                    <td>${review.movie_id}</td>
-                                    <td>${review.user_id}</td>
-                                    <td>${review.rating}/5</td>
-                                    <td>${review.comment || '—'}</td>
-                                </tr>
-                            `;
-                        });
-                        
-                        html += '</table>';
-                        document.getElementById('reviewsList').innerHTML = html;
-                    } catch (error) {
-                        document.getElementById('reviewsList').innerHTML = '<p style="color: red;">Ошибка загрузки отзывов</p>';
-                    }
-                }
-                
-                // Добавление фильма
-                document.getElementById('addMovieForm').addEventListener('submit', async function(e) {
-                    e.preventDefault();
-                    
-                    const token = localStorage.getItem('access_token');
-                    if (!token) {
-                        alert('Требуется авторизация');
-                        return;
-                    }
-                    
-                    const formData = new FormData(this);
-                    
-                    try {
-                        const response = await fetch('/admin/movies/', {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': 'Bearer ' + token
-                            },
-                            body: formData
-                        });
-                        
-                        const result = await response.json();
-                        
-                        if (response.ok) {
-                            document.getElementById('message').innerHTML = 
-                                '<p style="color: green;">✅ Фильм добавлен!</p>';
-                            this.reset();
-                            loadMovies();
-                        } else {
-                            document.getElementById('message').innerHTML = 
-                                `<p style="color: red;">❌ Ошибка: ${result.detail}</p>`;
-                        }
-                    } catch (error) {
-                        document.getElementById('message').innerHTML = 
-                            '<p style="color: red;">❌ Ошибка сети</p>';
-                    }
-                });
-                
-                // Удаление фильма
-                async function deleteMovie(movieId) {
-                    if (!confirm('Удалить этот фильм?')) return;
-                    
-                    const token = localStorage.getItem('access_token');
-                    if (!token) {
-                        alert('Требуется авторизация');
-                        return;
-                    }
-                    
-                    try {
-                        const response = await fetch(`/admin/movies/${movieId}`, {
-                            method: 'DELETE',
-                            headers: {
-                                'Authorization': 'Bearer ' + token
-                            }
-                        });
-                        
-                        if (response.ok) {
-                            alert('Фильм удален!');
-                            loadMovies();
-                        } else {
-                            const error = await response.json();
-                            alert('Ошибка: ' + error.detail);
-                        }
-                    } catch (error) {
-                        alert('Ошибка сети');
-                    }
+                function logout() {
+                    localStorage.removeItem('access_token');
+                    window.location.href = '/';
                 }
             </script>
         </body>
     </html>
     """)
 
-@app.get("/login-page", response_class=HTMLResponse, summary="Страница входа")
-async def login_page():
-    return HTMLResponse("""
-    <html>
-        <head>
-            <title>Вход</title>
-            <style>
-                body { font-family: Arial, sans-serif; max-width: 400px; margin: 50px auto; padding: 20px; }
-                form { display: flex; flex-direction: column; }
-                input { margin: 10px 0; padding: 10px; font-size: 16px; }
-                button { background: #49cc90; color: white; padding: 10px; border: none; cursor: pointer; }
-                a { color: #61affe; text-decoration: none; }
-            </style>
-        </head>
-        <body>
-            <h2>Вход в систему</h2>
-            <form id="loginForm">
-                <label>Имя пользователя:</label>
-                <input type="text" id="username" required>
-                <label>Пароль:</label>
-                <input type="password" id="password" required>
-                <button type="submit">Войти</button>
-            </form>
-            <div id="message"></div>
-            <p>Нет аккаунта? <a href="/register-page">Зарегистрируйтесь</a></p>
-            <p><a href="/">На главную</a></p>
-            
-            <script>
-                document.getElementById('loginForm').addEventListener('submit', async function(e) {
-                    e.preventDefault();
-                    
-                    const username = document.getElementById('username').value;
-                    const password = document.getElementById('password').value;
-                    
-                    try {
-                        const response = await fetch('/auth/login', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ username, password })
-                        });
-                        
-                        if (response.ok) {
-                            const data = await response.json();
-                            localStorage.setItem('access_token', data.access_token);
-                            document.getElementById('message').innerHTML = 
-                                '<p style="color: green;">✅ Успешный вход!</p>';
-                            setTimeout(() => window.location.href = '/', 1000);
-                        } else {
-                            const error = await response.json();
-                            document.getElementById('message').innerHTML = 
-                                `<p style="color: red;">❌ ${error.detail}</p>`;
-                        }
-                    } catch (error) {
-                        document.getElementById('message').innerHTML = 
-                            '<p style="color: red;">❌ Ошибка сети</p>';
-                    }
-                });
-            </script>
-        </body>
-    </html>
-    """)
-
-@app.get("/register-page", response_class=HTMLResponse, summary="Страница регистрации")
+@app.get("/register-page", response_class=HTMLResponse)
 async def register_page():
     return HTMLResponse("""
     <html>
         <head>
             <title>Регистрация</title>
             <style>
-                body { font-family: Arial, sans-serif; max-width: 400px; margin: 50px auto; padding: 20px; }
+                body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
                 form { display: flex; flex-direction: column; }
                 input { margin: 10px 0; padding: 10px; font-size: 16px; }
-                button { background: #49cc90; color: white; padding: 10px; border: none; cursor: pointer; }
-                a { color: #61affe; text-decoration: none; }
+                button { background: #3498db; color: white; padding: 10px; border: none; cursor: pointer; }
+                a { color: #3498db; text-decoration: none; }
+                .message { padding: 10px; margin: 10px 0; border-radius: 4px; }
+                .success { background: #d4edda; color: #155724; }
+                .error { background: #f8d7da; color: #721c24; }
+                .nav { 
+                    display: flex; 
+                    gap: 10px; 
+                    margin-bottom: 20px; 
+                    white-space: nowrap;
+                }
+                .nav a { 
+                    padding: 8px 15px; 
+                    text-decoration: none; 
+                    background: #3498db; 
+                    color: white; 
+                    border-radius: 4px;
+                    flex-shrink: 0;
+                }
             </style>
         </head>
         <body>
+            <div class="nav">
+                <a href="/">На главную</a>
+            </div>
+            
             <h2>Регистрация</h2>
             <form id="registerForm">
                 <label>Имя пользователя (мин. 3 символа):</label>
-                <input type="text" id="username" required>
+                <input type="text" id="username" required minlength="3">
                 <label>Email:</label>
                 <input type="email" id="email" required>
                 <label>Пароль (мин. 6 символов):</label>
-                <input type="password" id="password" required>
+                <input type="password" id="password" required minlength="6">
                 <button type="submit">Зарегистрироваться</button>
             </form>
             <div id="message"></div>
             <p>Уже есть аккаунт? <a href="/login-page">Войдите</a></p>
-            <p><a href="/">На главную</a></p>
             
             <script>
                 document.getElementById('registerForm').addEventListener('submit', async function(e) {
@@ -576,26 +157,949 @@ async def register_page():
                     try {
                         const response = await fetch('/auth/register', {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ username, email, password })
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json'
+                            },
+                            body: JSON.stringify({ 
+                                username: username, 
+                                email: email, 
+                                password: password 
+                            })
                         });
                         
                         if (response.ok) {
                             const data = await response.json();
                             document.getElementById('message').innerHTML = 
-                                '<p style="color: green;">✅ Регистрация успешна! Теперь войдите в систему.</p>';
+                                '<div class="message success">Регистрация успешна! Теперь войдите в систему.</div>';
                             setTimeout(() => window.location.href = '/login-page', 2000);
                         } else {
                             const error = await response.json();
                             document.getElementById('message').innerHTML = 
-                                `<p style="color: red;">❌ ${error.detail}</p>`;
+                                `<div class="message error">${error.detail || 'Ошибка регистрации'}</div>`;
                         }
                     } catch (error) {
                         document.getElementById('message').innerHTML = 
-                            '<p style="color: red;">❌ Ошибка сети</p>';
+                            '<div class="message error">Ошибка сети</div>';
                     }
                 });
             </script>
         </body>
     </html>
     """)
+
+@app.get("/login-page", response_class=HTMLResponse)
+async def login_page():
+    return HTMLResponse("""
+    <html>
+        <head>
+            <title>Вход</title>
+            <style>
+                body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+                form { display: flex; flex-direction: column; }
+                input { margin: 10px 0; padding: 10px; font-size: 16px; }
+                button { background: #3498db; color: white; padding: 10px; border: none; cursor: pointer; }
+                a { color: #3498db; text-decoration: none; }
+                .message { padding: 10px; margin: 10px 0; border-radius: 4px; }
+                .success { background: #d4edda; color: #155724; }
+                .error { background: #f8d7da; color: #721c24; }
+                .nav { 
+                    display: flex; 
+                    gap: 10px; 
+                    margin-bottom: 20px; 
+                    white-space: nowrap;
+                }
+                .nav a { 
+                    padding: 8px 15px; 
+                    text-decoration: none; 
+                    background: #3498db; 
+                    color: white; 
+                    border-radius: 4px;
+                    flex-shrink: 0;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="nav">
+                <a href="/">На главную</a>
+            </div>
+            
+            <h2>Вход в систему</h2>
+            <form id="loginForm">
+                <label>Имя пользователя:</label>
+                <input type="text" id="username" required>
+                <label>Пароль:</label>
+                <input type="password" id="password" required>
+                <button type="submit">Войти</button>
+            </form>
+            <div id="message"></div>
+            <p>Нет аккаунта? <a href="/register-page">Зарегистрируйтесь</a></p>
+            
+            <script>
+                document.getElementById('loginForm').addEventListener('submit', async function(e) {
+                    e.preventDefault();
+                    
+                    const username = document.getElementById('username').value;
+                    const password = document.getElementById('password').value;
+                    
+                    try {
+                        const response = await fetch('/auth/login', {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json'
+                            },
+                            body: JSON.stringify({ 
+                                username: username, 
+                                password: password 
+                            })
+                        });
+                        
+                        if (response.ok) {
+                            const data = await response.json();
+                            localStorage.setItem('access_token', data.access_token);
+                            setTimeout(() => window.location.href = '/my-movies-page', 1000);
+                        } else {
+                            const error = await response.json();
+                            document.getElementById('message').innerHTML = 
+                                `<div class="message error">${error.detail || 'Неверное имя пользователя или пароль'}</div>`;
+                        }
+                    } catch (error) {
+                        document.getElementById('message').innerHTML = 
+                            '<div class="message error">Ошибка сети</div>';
+                    }
+                });
+            </script>
+        </body>
+    </html>
+    """)
+
+@app.get("/my-movies-page", response_class=HTMLResponse)
+async def my_movies_page():
+    return HTMLResponse("""
+    <html>
+        <head>
+            <title>Мои фильмы</title>
+            <style>
+                body { font-family: Arial, sans-serif; max-width: 1400px; margin: 0 auto; padding: 20px; }
+                .section { margin: 30px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+                .movies-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+                .movie-card { border: 1px solid #eee; padding: 15px; border-radius: 5px; }
+                .movie-card img { max-width: 100%; height: 200px; object-fit: cover; }
+                input, textarea, select { width: 100%; padding: 8px; margin: 5px 0; box-sizing: border-box; }
+                button { background: #3498db; color: white; padding: 10px 20px; border: none; cursor: pointer; margin: 10px 5px; border-radius: 4px; }
+                .delete-btn { background: #e74c3c; }
+                .edit-btn { background: #f39c12; }
+                .nav { 
+                    display: flex; 
+                    gap: 10px; 
+                    margin: 20px 0; 
+                    white-space: nowrap;
+                }
+                .nav a { 
+                    padding: 8px 15px; 
+                    background: #3498db; 
+                    color: white; 
+                    text-decoration: none; 
+                    border-radius: 4px; 
+                    flex-shrink: 0;
+                }
+                .logout-btn { background: #e74c3c; }
+                .loading { text-align: center; padding: 20px; }
+                .message { padding: 10px; margin: 10px 0; border-radius: 4px; }
+                .success { background: #d4edda; color: #155724; }
+                .error { background: #f8d7da; color: #721c24; }
+                .recommended { border-left: 4px solid #f39c12; }
+                .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.4); }
+                .modal-content { background-color: white; margin: 10% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 500px; border-radius: 5px; }
+                .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+                .close:hover { color: black; }
+            </style>
+        </head>
+        <body>
+            <h1>Мои фильмы</h1>
+            
+            <div class="nav">
+                <a href="/">На главную</a>
+                <a href="/movies-page">Все фильмы</a>
+                <a href="/docs">Документация API</a>
+                <a href="#" onclick="logout()" class="logout-btn">Выйти</a>
+            </div>
+            
+            <div id="authInfo"></div>
+            
+            <div class="section">
+                <h2>Добавить новый фильм</h2>
+                <form id="addMovieForm" enctype="multipart/form-data">
+                    <input type="text" name="title" placeholder="Название" required>
+                    <input type="text" name="director" placeholder="Режиссёр" required>
+                    <input type="number" name="year" placeholder="Год" min="1888" max="2025">
+                    <input type="text" name="genre" placeholder="Жанр">
+                    <textarea name="description" placeholder="Описание" rows="3"></textarea>
+                    <input type="number" name="duration" placeholder="Длительность (минут)" min="1">
+                    <input type="number" name="cost" placeholder="Бюджет" step="0.01" min="0">
+                    <input type="number" name="rating" placeholder="Мой рейтинг (0-10)" step="0.1" min="0" max="10">
+                    <label><input type="checkbox" name="is_recommended"> Рекомендую</label>
+                    <input type="file" name="photo" accept="image/*">
+                    <button type="submit">Добавить в мою коллекцию</button>
+                </form>
+                <div id="message"></div>
+            </div>
+            
+            <div class="section">
+                <h2>Моя коллекция</h2>
+                <div id="moviesList" class="loading">Загрузка...</div>
+            </div>
+            
+            <div class="section">
+                <h2>Рекомендации для вас</h2>
+                <div id="recommendations" class="loading">Загрузка рекомендаций...</div>
+            </div>
+            
+            <div id="editModal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeEditModal()">&times;</span>
+                    <h3>Редактировать фильм</h3>
+                    <form id="editMovieForm" enctype="multipart/form-data">
+                        <input type="hidden" id="editMovieId" name="movie_id">
+                        <input type="text" id="editTitle" name="title" placeholder="Название" required>
+                        <input type="text" id="editDirector" name="director" placeholder="Режиссёр" required>
+                        <input type="number" id="editYear" name="year" placeholder="Год" min="1888" max="2025">
+                        <input type="text" id="editGenre" name="genre" placeholder="Жанр">
+                        <textarea id="editDescription" name="description" placeholder="Описание" rows="3"></textarea>
+                        <input type="number" id="editDuration" name="duration" placeholder="Длительность (минут)" min="1">
+                        <input type="number" id="editCost" name="cost" placeholder="Бюджет" step="0.01" min="0">
+                        <input type="number" id="editRating" name="rating" placeholder="Мой рейтинг (0-10)" step="0.1" min="0" max="10">
+                        <label><input type="checkbox" id="editIsRecommended" name="is_recommended"> Рекомендую</label>
+                        <input type="file" id="editPhoto" name="photo" accept="image/*">
+                        <div id="currentPhoto"></div>
+                        <button type="submit">Сохранить изменения</button>
+                    </form>
+                    <div id="editMessage"></div>
+                </div>
+            </div>
+            
+            <script>
+                function isTokenExpired(token) {
+                    try {
+                        const payload = JSON.parse(atob(token.split('.')[1]));
+                        const exp = payload.exp * 1000;
+                        const now = Date.now();
+                        return now >= exp;
+                    } catch (e) {
+                        return true;
+                    }
+                }
+                
+                const token = localStorage.getItem('access_token');
+                const authInfo = document.getElementById('authInfo');
+                
+                if (!token || isTokenExpired(token)) {
+                    if (token && isTokenExpired(token)) {
+                        localStorage.removeItem('access_token');
+                    }
+                    authInfo.innerHTML = '<div class="message error">Вы не авторизованы. <a href="/login-page">Войдите</a> чтобы управлять своей коллекцией фильмов</div>';
+                } else {
+                    try {
+                        const payload = JSON.parse(atob(token.split('.')[1]));
+                        authInfo.innerHTML = `<div class="message success">Вы авторизованы как: ${payload.sub}</div>`;
+                        loadMyMovies();
+                        loadRecommendations();
+                    } catch (e) {
+                        authInfo.innerHTML = '<div class="message error">Неверный токен. <a href="/login-page">Войдите снова</a></div>';
+                    }
+                }
+                
+                function logout() {
+                    localStorage.removeItem('access_token');
+                    window.location.href = '/';
+                }
+                
+                async function loadMyMovies() {
+                    try {
+                        const response = await fetch('/user/movies/', {
+                            headers: {
+                                'Authorization': 'Bearer ' + token
+                            }
+                        });
+                        
+                        if (!response.ok) {
+                            if (response.status === 401) {
+                                if (isTokenExpired(token)) {
+                                    localStorage.removeItem('access_token');
+                                    window.location.href = '/login-page';
+                                }
+                                document.getElementById('moviesList').innerHTML = '<div class="message error">Требуется авторизация</div>';
+                                return;
+                            }
+                            throw new Error('Ошибка загрузки');
+                        }
+                        
+                        const movies = await response.json();
+                        
+                        if (movies.length === 0) {
+                            document.getElementById('moviesList').innerHTML = '<p>Ваша коллекция пуста. Добавьте первый фильм!</p>';
+                            return;
+                        }
+                        
+                        let html = '<div class="movies-grid">';
+                        
+                        movies.forEach(movie => {
+                            const movieClass = movie.is_recommended ? 'movie-card recommended' : 'movie-card';
+                            const photoUrl = movie.photo_url || '/static/default_movie.jpg';
+                            
+                            html += `
+                                <div class="${movieClass}" id="movie-${movie.id}">
+                                    <h3>${movie.title}</h3>
+                                    <img src="${photoUrl}" alt="${movie.title}" onerror="this.src='/static/default_movie.jpg'">
+                                    <p><strong>Режиссёр:</strong> ${movie.director}</p>
+                                    <p><strong>Год:</strong> ${movie.year || '—'}</p>
+                                    <p><strong>Жанр:</strong> ${movie.genre || '—'}</p>
+                                    <p><strong>Мой рейтинг:</strong> ${movie.rating?.toFixed(1) || '0.0'}/10</p>
+                                    ${movie.is_recommended ? '<p><strong>Рекомендую этот фильм!</strong></p>' : ''}
+                                    <div>
+                                        <button onclick="openEditModal(${movie.id})" class="edit-btn">Редактировать</button>
+                                        <button onclick="deleteMovie(${movie.id})" class="delete-btn">Удалить</button>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        
+                        html += '</div>';
+                        document.getElementById('moviesList').innerHTML = html;
+                    } catch (error) {
+                        document.getElementById('moviesList').innerHTML = '<div class="message error">Ошибка загрузки фильмов</div>';
+                    }
+                }
+                
+                async function loadRecommendations() {
+                    try {
+                        const response = await fetch('/recommendations/?limit=6', {
+                            headers: {
+                                'Authorization': 'Bearer ' + token
+                            }
+                        });
+                        
+                        if (!response.ok) throw new Error('Ошибка загрузки');
+                        const recommendations = await response.json();
+                        
+                        if (recommendations.length === 0) {
+                            document.getElementById('recommendations').innerHTML = '<p>Пока нет рекомендаций</p>';
+                            return;
+                        }
+                        
+                        let html = '<div class="movies-grid">';
+                        
+                        recommendations.forEach(movie => {
+                            const photoUrl = movie.photo_url || '/static/default_movie.jpg';
+                            
+                            html += `
+                                <div class="movie-card">
+                                    <h3>${movie.title}</h3>
+                                    <img src="${photoUrl}" alt="${movie.title}" onerror="this.src='/static/default_movie.jpg'">
+                                    <p><strong>Режиссёр:</strong> ${movie.director}</p>
+                                    <p><strong>Год:</strong> ${movie.year || '—'}</p>
+                                    <p><strong>Рейтинг:</strong> ${movie.rating?.toFixed(1) || '0.0'}/10</p>
+                                </div>
+                            `;
+                        });
+                        
+                        html += '</div>';
+                        document.getElementById('recommendations').innerHTML = html;
+                    } catch (error) {
+                        document.getElementById('recommendations').innerHTML = '<div class="message error">Ошибка загрузки рекомендаций</div>';
+                    }
+                }
+                
+                document.getElementById('addMovieForm').addEventListener('submit', async function(e) {
+                    e.preventDefault();
+                    
+                    if (!token || isTokenExpired(token)) {
+                        if (token && isTokenExpired(token)) {
+                            localStorage.removeItem('access_token');
+                        }
+                        alert('Сессия истекла. Пожалуйста, войдите снова.');
+                        window.location.href = '/login-page';
+                        return;
+                    }
+                    
+                    const formData = new FormData(this);
+                    
+                    try {
+                        const response = await fetch('/user/movies/', {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': 'Bearer ' + token
+                            },
+                            body: formData
+                        });
+                        
+                        if (response.status === 401) {
+                            if (isTokenExpired(token)) {
+                                localStorage.removeItem('access_token');
+                                alert('Сессия истекла. Пожалуйста, войдите снова.');
+                                window.location.href = '/login-page';
+                            }
+                            return;
+                        }
+                        
+                        const result = await response.json();
+                        
+                        if (response.ok) {
+                            document.getElementById('message').innerHTML = 
+                                '<div class="message success">Фильм добавлен в вашу коллекцию!</div>';
+                            this.reset();
+                            loadMyMovies();
+                        } else {
+                            document.getElementById('message').innerHTML = 
+                                `<div class="message error">Ошибка: ${result.detail}</div>`;
+                        }
+                    } catch (error) {
+                        document.getElementById('message').innerHTML = 
+                            '<div class="message error">Ошибка сети</div>';
+                    }
+                });
+                
+                async function deleteMovie(movieId) {
+                    if (!confirm('Удалить этот фильм из вашей коллекции?')) return;
+                    
+                    if (!token || isTokenExpired(token)) {
+                        if (token && isTokenExpired(token)) {
+                            localStorage.removeItem('access_token');
+                        }
+                        alert('Сессия истекла. Пожалуйста, войдите снова.');
+                        window.location.href = '/login-page';
+                        return;
+                    }
+                    
+                    try {
+                        const response = await fetch(`/user/movies/${movieId}`, {
+                            method: 'DELETE',
+                            headers: {
+                                'Authorization': 'Bearer ' + token
+                            }
+                        });
+                        
+                        if (response.ok) {
+                            alert('Фильм удален из вашей коллекции!');
+                            loadMyMovies();
+                        } else {
+                            if (response.status === 401) {
+                                if (isTokenExpired(token)) {
+                                    localStorage.removeItem('access_token');
+                                    alert('Сессия истекла. Пожалуйста, войдите снова.');
+                                    window.location.href = '/login-page';
+                                }
+                                return;
+                            }
+                            const error = await response.json();
+                            alert('Ошибка: ' + error.detail);
+                        }
+                    } catch (error) {
+                        alert('Ошибка сети');
+                    }
+                }
+                
+                async function openEditModal(movieId) {
+                    if (!token || isTokenExpired(token)) {
+                        if (token && isTokenExpired(token)) {
+                            localStorage.removeItem('access_token');
+                        }
+                        alert('Сессия истекла. Пожалуйста, войдите снова.');
+                        window.location.href = '/login-page';
+                        return;
+                    }
+                    
+                    try {
+                        const response = await fetch(`/movies/${movieId}`);
+                        if (!response.ok) throw new Error('Ошибка загрузки данных фильма');
+                        
+                        const movie = await response.json();
+                        
+                        document.getElementById('editMovieId').value = movie.id;
+                        document.getElementById('editTitle').value = movie.title;
+                        document.getElementById('editDirector').value = movie.director;
+                        document.getElementById('editYear').value = movie.year || '';
+                        document.getElementById('editGenre').value = movie.genre || '';
+                        document.getElementById('editDescription').value = movie.description || '';
+                        document.getElementById('editDuration').value = movie.duration || '';
+                        document.getElementById('editCost').value = movie.cost || '';
+                        document.getElementById('editRating').value = movie.rating || '';
+                        document.getElementById('editIsRecommended').checked = movie.is_recommended || false;
+                        
+                        const photoUrl = movie.photo_url || '/static/default_movie.jpg';
+                        document.getElementById('currentPhoto').innerHTML = `
+                            <p>Текущее изображение:</p>
+                            <img src="${photoUrl}" alt="${movie.title}" style="max-width: 100px; height: auto;" onerror="this.src='/static/default_movie.jpg'">
+                        `;
+                        
+                        document.getElementById('editModal').style.display = 'block';
+                    } catch (error) {
+                        alert('Ошибка загрузки данных фильма');
+                    }
+                }
+                
+                function closeEditModal() {
+                    document.getElementById('editModal').style.display = 'none';
+                    document.getElementById('editMessage').innerHTML = '';
+                }
+                
+                document.getElementById('editMovieForm').addEventListener('submit', async function(e) {
+                    e.preventDefault();
+                    
+                    if (!token || isTokenExpired(token)) {
+                        if (token && isTokenExpired(token)) {
+                            localStorage.removeItem('access_token');
+                        }
+                        alert('Сессия истекла. Пожалуйста, войдите снова.');
+                        window.location.href = '/login-page';
+                        return;
+                    }
+                    
+                    const movieId = document.getElementById('editMovieId').value;
+                    const formData = new FormData(this);
+                    
+                    try {
+                        const response = await fetch(`/user/movies/${movieId}`, {
+                            method: 'PUT',
+                            headers: {
+                                'Authorization': 'Bearer ' + token
+                            },
+                            body: formData
+                        });
+                        
+                        if (response.status === 401) {
+                            if (isTokenExpired(token)) {
+                                localStorage.removeItem('access_token');
+                                alert('Сессия истекла. Пожалуйста, войдите снова.');
+                                window.location.href = '/login-page';
+                            }
+                            return;
+                        }
+                        
+                        const result = await response.json();
+                        
+                        if (response.ok) {
+                            document.getElementById('editMessage').innerHTML = 
+                                '<div class="message success">Фильм обновлен!</div>';
+                            setTimeout(() => {
+                                closeEditModal();
+                                loadMyMovies();
+                            }, 1500);
+                        } else {
+                            document.getElementById('editMessage').innerHTML = 
+                                `<div class="message error">Ошибка: ${result.detail}</div>`;
+                        }
+                    } catch (error) {
+                        document.getElementById('editMessage').innerHTML = 
+                            '<div class="message error">Ошибка сети</div>';
+                    }
+                });
+                
+                window.onclick = function(event) {
+                    const modal = document.getElementById('editModal');
+                    if (event.target == modal) {
+                        closeEditModal();
+                    }
+                }
+            </script>
+        </body>
+    </html>
+    """)
+
+@app.get("/movies-page", response_class=HTMLResponse)
+async def movies_page():
+    return HTMLResponse("""
+    <html>
+        <head>
+            <title>Все фильмы</title>
+            <style>
+                body { font-family: Arial, sans-serif; max-width: 1400px; margin: 0 auto; padding: 20px; }
+                .section { margin: 30px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+                .movies-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; }
+                .movie-card { border: 1px solid #eee; padding: 15px; border-radius: 5px; }
+                .movie-card img { max-width: 100%; height: 200px; object-fit: cover; }
+                input, textarea, select { width: 100%; padding: 8px; margin: 5px 0; box-sizing: border-box; }
+                button { background: #3498db; color: white; padding: 10px 20px; border: none; cursor: pointer; margin: 10px 5px; border-radius: 4px; }
+                .nav { 
+                    display: flex; 
+                    gap: 10px; 
+                    margin: 20px 0; 
+                    white-space: nowrap;
+                }
+                .nav a { 
+                    padding: 8px 15px; 
+                    background: #3498db; 
+                    color: white; 
+                    text-decoration: none; 
+                    border-radius: 4px; 
+                    flex-shrink: 0;
+                }
+                .logout-btn { background: #e74c3c; }
+                .search-container { display: flex; gap: 10px; margin: 20px 0; }
+                .search-container input { flex: 1; }
+                .loading { text-align: center; padding: 20px; }
+                .message { padding: 10px; margin: 10px 0; border-radius: 4px; }
+                .success { background: #d4edda; color: #155724; }
+                .error { background: #f8d7da; color: #721c24; }
+                .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.4); }
+                .modal-content { background-color: white; margin: 10% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 500px; border-radius: 5px; }
+                .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+                .close:hover { color: black; }
+                .review-section { margin-top: 20px; border-top: 1px solid #ddd; padding-top: 15px; }
+            </style>
+        </head>
+        <body>
+            <h1>Все фильмы</h1>
+            
+            <div class="nav">
+                <a href="/">На главную</a>
+                <a href="/my-movies-page">Мои фильмы</a>
+                <a href="/docs">Документация API</a>
+                <a href="#" onclick="logout()" class="logout-btn">Выйти</a>
+            </div>
+            
+            <div class="section">
+                <h2>Поиск фильмов</h2>
+                <div class="search-container">
+                    <input type="text" id="searchTitle" placeholder="Поиск по названию...">
+                    <input type="number" id="searchMinRating" placeholder="Минимальный рейтинг (0-10)" step="0.1" min="0" max="10">
+                    <button onclick="searchMovies()">Поиск</button>
+                    <button onclick="clearSearch()">Сбросить</button>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Каталог фильмов</h2>
+                <div id="moviesList" class="loading">Загрузка фильмов...</div>
+            </div>
+            
+            <div id="reviewModal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeReviewModal()">&times;</span>
+                    <h3>Добавить отзыв</h3>
+                    <form id="reviewForm">
+                        <input type="hidden" id="reviewMovieId" name="movie_id">
+                        <p>Фильм: <span id="reviewMovieTitle"></span></p>
+                        <label>Рейтинг (1-5):</label>
+                        <select id="reviewRating" name="rating" required>
+                            <option value="1">1 - Плохо</option>
+                            <option value="2">2 - Неплохо</option>
+                            <option value="3">3 - Хорошо</option>
+                            <option value="4" selected>4 - Очень хорошо</option>
+                            <option value="5">5 - Отлично</option>
+                        </select>
+                        <label>Комментарий:</label>
+                        <textarea id="reviewComment" name="comment" rows="4" placeholder="Ваш отзыв..."></textarea>
+                        <button type="submit">Отправить отзыв</button>
+                    </form>
+                    <div id="reviewMessage"></div>
+                    
+                    <div id="reviewsList" class="review-section">
+                        <h4>Отзывы на этот фильм:</h4>
+                        <div id="existingReviews">Загрузка отзывов...</div>
+                    </div>
+                </div>
+            </div>
+            
+            <script>
+                function isTokenExpired(token) {
+                    try {
+                        const payload = JSON.parse(atob(token.split('.')[1]));
+                        const exp = payload.exp * 1000;
+                        const now = Date.now();
+                        return now >= exp;
+                    } catch (e) {
+                        return true;
+                    }
+                }
+                
+                const token = localStorage.getItem('access_token');
+                
+                function logout() {
+                    localStorage.removeItem('access_token');
+                    window.location.href = '/';
+                }
+                
+                async function loadAllMovies() {
+                    try {
+                        const response = await fetch('/movies/?limit=100');
+                        if (!response.ok) throw new Error('Ошибка загрузки');
+                        
+                        const movies = await response.json();
+                        displayMovies(movies);
+                    } catch (error) {
+                        document.getElementById('moviesList').innerHTML = '<div class="message error">Ошибка загрузки фильмов</div>';
+                    }
+                }
+                
+                async function searchMovies() {
+                    const title = document.getElementById('searchTitle').value;
+                    const minRating = document.getElementById('searchMinRating').value;
+                    
+                    let url = '/movies/?limit=100';
+                    if (title) url += `&title=${encodeURIComponent(title)}`;
+                    if (minRating) url += `&min_rating=${minRating}`;
+                    
+                    try {
+                        const response = await fetch(url);
+                        if (!response.ok) throw new Error('Ошибка поиска');
+                        
+                        const movies = await response.json();
+                        displayMovies(movies);
+                    } catch (error) {
+                        document.getElementById('moviesList').innerHTML = '<div class="message error">Ошибка поиска</div>';
+                    }
+                }
+                
+                function clearSearch() {
+                    document.getElementById('searchTitle').value = '';
+                    document.getElementById('searchMinRating').value = '';
+                    loadAllMovies();
+                }
+                
+                function displayMovies(movies) {
+                    if (movies.length === 0) {
+                        document.getElementById('moviesList').innerHTML = '<p>Фильмы не найдены</p>';
+                        return;
+                    }
+                    
+                    let html = '<div class="movies-grid">';
+                    
+                    movies.forEach(movie => {
+                        const photoUrl = movie.photo_url || '/static/default_movie.jpg';
+                        
+                        html += `
+                            <div class="movie-card">
+                                <h3>${movie.title}</h3>
+                                <img src="${photoUrl}" alt="${movie.title}" onerror="this.src='/static/default_movie.jpg'">
+                                <p><strong>Режиссёр:</strong> ${movie.director}</p>
+                                <p><strong>Год:</strong> ${movie.year || '—'}</p>
+                                <p><strong>Жанр:</strong> ${movie.genre || '—'}</p>
+                                <p><strong>Рейтинг:</strong> ${movie.rating?.toFixed(1) || '0.0'}/10</p>
+                                <button onclick="openReviewModal(${movie.id}, '${movie.title.replace(/'/g, "\\'")}')">Оставить отзыв</button>
+                            </div>
+                        `;
+                    });
+                    
+                    html += '</div>';
+                    document.getElementById('moviesList').innerHTML = html;
+                }
+                
+                function openReviewModal(movieId, movieTitle) {
+                    if (!token || isTokenExpired(token)) {
+                        if (token && isTokenExpired(token)) {
+                            localStorage.removeItem('access_token');
+                        }
+                        alert('Для добавления отзыва необходимо авторизоваться');
+                        window.location.href = '/login-page';
+                        return;
+                    }
+                    
+                    document.getElementById('reviewMovieId').value = movieId;
+                    document.getElementById('reviewMovieTitle').textContent = movieTitle;
+                    document.getElementById('reviewModal').style.display = 'block';
+                    loadExistingReviews(movieId);
+                }
+                
+                function closeReviewModal() {
+                    document.getElementById('reviewModal').style.display = 'none';
+                    document.getElementById('reviewMessage').innerHTML = '';
+                }
+                
+                async function loadExistingReviews(movieId) {
+                    try {
+                        const response = await fetch(`/reviews/?movie_id=${movieId}`);
+                        if (!response.ok) throw new Error('Ошибка загрузки отзывов');
+                        
+                        const reviews = await response.json();
+                        let html = '';
+                        
+                        if (reviews.length === 0) {
+                            html = '<p>Пока нет отзывов. Будьте первым!</p>';
+                        } else {
+                            reviews.forEach(review => {
+                                html += `
+                                    <div style="border-bottom: 1px solid #eee; padding: 10px 0;">
+                                        <p><strong>Рейтинг:</strong> ${review.rating}/5</p>
+                                        <p><strong>Комментарий:</strong> ${review.comment || 'Без комментария'}</p>
+                                        <p style="font-size: 0.9em; color: #666;">Добавлен: ${new Date(review.created_at).toLocaleDateString()}</p>
+                                    </div>
+                                `;
+                            });
+                        }
+                        
+                        document.getElementById('existingReviews').innerHTML = html;
+                    } catch (error) {
+                        document.getElementById('existingReviews').innerHTML = '<p>Ошибка загрузки отзывов</p>';
+                    }
+                }
+                
+                document.getElementById('reviewForm').addEventListener('submit', async function(e) {
+                    e.preventDefault();
+                    
+                    if (!token || isTokenExpired(token)) {
+                        if (token && isTokenExpired(token)) {
+                            localStorage.removeItem('access_token');
+                        }
+                        alert('Сессия истекла. Пожалуйста, войдите снова.');
+                        window.location.href = '/login-page';
+                        return;
+                    }
+                    
+                    const movieId = document.getElementById('reviewMovieId').value;
+                    const rating = document.getElementById('reviewRating').value;
+                    const comment = document.getElementById('reviewComment').value;
+                    
+                    try {
+                        const response = await fetch('/reviews/', {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': 'Bearer ' + token,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                movie_id: parseInt(movieId),
+                                rating: parseInt(rating),
+                                comment: comment
+                            })
+                        });
+                        
+                        if (response.status === 401) {
+                            if (isTokenExpired(token)) {
+                                localStorage.removeItem('access_token');
+                                alert('Сессия истекла. Пожалуйста, войдите снова.');
+                                window.location.href = '/login-page';
+                            }
+                            return;
+                        }
+                        
+                        const result = await response.json();
+                        
+                        if (response.ok) {
+                            document.getElementById('reviewMessage').innerHTML = 
+                                '<div class="message success">Отзыв добавлен!</div>';
+                            setTimeout(() => {
+                                closeReviewModal();
+                                loadExistingReviews(movieId);
+                            }, 1500);
+                        } else {
+                            document.getElementById('reviewMessage').innerHTML = 
+                                `<div class="message error">Ошибка: ${result.detail}</div>`;
+                        }
+                    } catch (error) {
+                        document.getElementById('reviewMessage').innerHTML = 
+                            '<div class="message error">Ошибка сети</div>';
+                    }
+                });
+                
+                window.onclick = function(event) {
+                    const modal = document.getElementById('reviewModal');
+                    if (event.target == modal) {
+                        closeReviewModal();
+                    }
+                }
+                
+                loadAllMovies();
+            </script>
+        </body>
+    </html>
+    """)
+
+
+@app.post("/auth/register", response_model=models.UserResponse, 
+        summary="Регистрация пользователя",
+        description="Создает нового пользователя в системе с уникальным username и email.")
+async def register(user: models.UserCreate, db: AsyncSession = Depends(get_db)):
+    return await crud.create_user(db, user)
+
+
+@app.post("/auth/login", response_model=models.Token,
+        summary="Вход в систему",
+        description="Аутентификация пользователя. Возвращает JWT токен для доступа к защищенным эндпоинтам.")
+async def login(user_data: models.UserLogin, db: AsyncSession = Depends(get_db)):
+    user = await auth.authenticate_user(db, user_data.username, user_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверное имя пользователя или пароль",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    from datetime import datetime
+    user.last_login = datetime.utcnow()
+    await db.commit()
+    
+    access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = auth.create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/movies/", response_model=List[models.MovieResponse],
+        summary="Получить все фильмы",
+        description="Возвращает список всех фильмов.")
+async def read_movies(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    genre: Optional[str] = Query(None),
+    min_rating: Optional[float] = Query(None, ge=0.0, le=10.0),
+    title: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db)
+):
+    from sqlalchemy.future import select
+    from app.schemas import MovieDB
+    
+    query = select(MovieDB)
+    
+    if genre:
+        query = query.where(MovieDB.genre.contains(genre))
+    
+    if min_rating:
+        query = query.where(MovieDB.rating >= min_rating)
+    
+    if title:
+        query = query.where(MovieDB.title.contains(title))
+    
+    query = query.offset(skip).limit(limit)
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
+@app.get("/movies/{movie_id}", response_model=models.MovieResponse,
+        summary="Получить фильм по ID",
+        description="Возвращает информацию о фильме по его ID.")
+async def read_movie(movie_id: int, db: AsyncSession = Depends(get_db)):
+    return await crud.get_movie(db, movie_id)
+
+
+@app.post("/reviews/", response_model=models.ReviewResponse,
+        summary="Создать отзыв",
+        description="Создает новый отзыв на фильм. Пользователь может оставить только один отзыв на фильм.")
+async def create_review(
+    review: models.ReviewCreate,
+    current_user = Depends(auth.get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    return await crud.create_review(db, review, current_user.id)
+
+
+@app.get("/reviews/", response_model=List[models.ReviewResponse],
+        summary="Получить отзывы",
+        description="Возвращает список отзывов.")
+async def read_reviews(
+    movie_id: Optional[int] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    db: AsyncSession = Depends(get_db)
+):
+    if movie_id:
+        return await crud.get_movie_reviews(db, movie_id)
+    from sqlalchemy.future import select
+    from app.schemas import ReviewDB
+    result = await db.execute(
+        select(ReviewDB).offset(skip).limit(limit)
+    )
+    return result.scalars().all()

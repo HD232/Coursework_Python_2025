@@ -5,14 +5,11 @@ from typing import List, Optional
 from datetime import datetime
 import shutil
 import os
-
 from app import models
 from app import auth
-from app.schemas import MovieDB, UserDB, ReviewDB
+from app.schemas import MovieDB, ReviewDB, UserDB
 
-# ============ Функции для пользователей ============
 async def create_user(db: AsyncSession, user: models.UserCreate):
-    # Проверяем существование пользователя
     existing_user = await auth.get_user_by_username(db, user.username)
     if existing_user:
         raise HTTPException(
@@ -28,6 +25,7 @@ async def create_user(db: AsyncSession, user: models.UserCreate):
         )
     
     hashed_password = auth.get_password_hash(user.password)
+    
     db_user = UserDB(
         username=user.username,
         email=user.email,
@@ -40,51 +38,13 @@ async def create_user(db: AsyncSession, user: models.UserCreate):
     await db.refresh(db_user)
     return db_user
 
-async def create_admin_user(db: AsyncSession):
-    admin_username = "admin"
-    admin_email = "admin@example.com"
-    admin_password = "123"  # В реальном приложении используйте сложный пароль!
-    
-    print(f"🔍 Проверяем существование администратора: {admin_username}")
-    
-    # Проверяем, существует ли уже админ
-    existing_admin = await auth.get_user_by_username(db, admin_username)
-    if existing_admin:
-        print(f"✅ Администратор уже существует: {existing_admin.username}")
-        print(f"🔑 Хеш пароля в БД: {existing_admin.hashed_password}")
-        
-        # Проверяем, что пароль правильный
-        test_password = "admin123"
-        is_correct = auth.verify_password(test_password, existing_admin.hashed_password)
-        print(f"🔐 Проверка пароля '{test_password}': {'✅ Корректный' if is_correct else '❌ Неверный'}")
-        
-        return existing_admin
-    
-    print(f"➕ Создаем нового администратора: {admin_username}")
-    hashed_password = auth.get_password_hash(admin_password)
-    print(f"🔑 Хешируем пароль: {admin_password} -> {hashed_password}")
-    
-    admin_user = UserDB(
-        username=admin_username,
-        email=admin_email,
-        hashed_password=hashed_password,
-        is_admin=True
-    )
-    
-    db.add(admin_user)
-    await db.commit()
-    await db.refresh(admin_user)
-    
-    print(f"🎉 Администратор успешно создан: {admin_user.username}, ID: {admin_user.id}")
-    return admin_user
-
-# ============ Функции для фильмов ============
 async def get_movies(
     db: AsyncSession,
     skip: int = 0,
     limit: int = 100,
     genre: Optional[str] = None,
-    min_rating: Optional[float] = None
+    min_rating: Optional[float] = None,
+    title: Optional[str] = None
 ):
     query = select(MovieDB)
     
@@ -93,6 +53,9 @@ async def get_movies(
     
     if min_rating:
         query = query.where(MovieDB.rating >= min_rating)
+    
+    if title:
+        query = query.where(MovieDB.title.contains(title))
     
     query = query.offset(skip).limit(limit)
     result = await db.execute(query)
@@ -118,18 +81,6 @@ async def create_movie(
     user_id: int,
     photo: Optional[UploadFile] = None
 ):
-    # Проверяем существование фильма
-    result = await db.execute(
-        select(MovieDB).where(MovieDB.title == movie.title)
-    )
-    existing_movie = result.scalar_one_or_none()
-    
-    if existing_movie:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Фильм с таким названием уже существует"
-        )
-    
     photo_url = "static/default_movie.jpg"
     
     if photo and photo.filename:
@@ -196,9 +147,8 @@ async def delete_movie(db: AsyncSession, movie_id: int):
     
     await db.delete(db_movie)
     await db.commit()
-    return {"message": "Фильм успешно удален"}
+    return {"message": "Фильм удален"}
 
-# ============ Функции для отзывов ============
 async def create_review(
     db: AsyncSession,
     review: models.ReviewCreate,
@@ -206,7 +156,6 @@ async def create_review(
 ):
     movie = await get_movie(db, review.movie_id)
     
-    # Проверяем, не оставлял ли пользователь уже отзыв
     result = await db.execute(
         select(ReviewDB).where(
             ReviewDB.movie_id == review.movie_id,
@@ -226,9 +175,8 @@ async def create_review(
         user_id=user_id
     )
     
-    # Обновляем рейтинг фильма
     movie_reviews = await get_movie_reviews(db, review.movie_id)
-    total_rating = sum([r.rating for r in movie_reviews]) + review.rating
+    total_rating = sum([r.rating * 2 for r in movie_reviews]) + (review.rating * 2)  # Конвертация в 0-10
     movie.rating = total_rating / (len(movie_reviews) + 1)
     
     db.add(db_review)
@@ -247,3 +195,55 @@ async def get_user_reviews(db: AsyncSession, user_id: int):
         select(ReviewDB).where(ReviewDB.user_id == user_id)
     )
     return result.scalars().all()
+
+async def get_review(db: AsyncSession, review_id: int):
+    result = await db.execute(
+        select(ReviewDB).where(ReviewDB.id == review_id)
+    )
+    review = result.scalar_one_or_none()
+    if review is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Отзыв не найден"
+        )
+    return review
+
+async def update_review(db: AsyncSession, review_id: int, review_update: models.ReviewUpdate):
+    review = await get_review(db, review_id)
+    
+    old_rating = review.rating
+    update_data = review_update.dict(exclude_unset=True)
+    
+    for field, value in update_data.items():
+        setattr(review, field, value)
+    
+    await db.commit()
+    await db.refresh(review)
+    
+    if 'rating' in update_data:
+        movie = await get_movie(db, review.movie_id)
+        movie_reviews = await get_movie_reviews(db, review.movie_id)
+        if movie_reviews:
+            total_rating = sum([r.rating * 2 for r in movie_reviews])
+            movie.rating = total_rating / len(movie_reviews)
+            await db.commit()
+    
+    return review
+
+async def delete_review(db: AsyncSession, review_id: int):
+    review = await get_review(db, review_id)
+    movie_id = review.movie_id
+    
+    await db.delete(review)
+    await db.commit()
+    
+    movie = await get_movie(db, movie_id)
+    movie_reviews = await get_movie_reviews(db, movie_id)
+    if movie_reviews:
+        total_rating = sum([r.rating * 2 for r in movie_reviews])
+        movie.rating = total_rating / len(movie_reviews)
+    else:
+        movie.rating = 0.0
+    
+    await db.commit()
+    return {"message": "Отзыв успешно удален"}

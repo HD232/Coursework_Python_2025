@@ -5,21 +5,74 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from datetime import timedelta
 import os
+
+from sqlalchemy.ext.asyncio import AsyncEngine
 from app import models, auth, crud
-from app.database import get_db, init_db
-from app.routes import router as user_router
+
+from app.database import engine, AsyncSessionLocal, get_db, Base
+from app.routes import router
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy.future import select
+from app.schemas import ReviewDB, MovieDB, UserDB
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI()
 
-app.include_router(user_router)
+app.include_router(router)
 
 os.makedirs("static/uploads", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.on_event("startup")
-async def startup_event():
-    await init_db()
+async def startup():
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        
+        await create_initial_admin()
+        print("База данных инициализирована, администратор создан")
+    except Exception as e:
+        print(f"Ошибка инициализации базы данных: {e}")
+
+async def create_initial_admin():
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(UserDB).where(UserDB.username == "admin")
+            )
+            admin = result.scalar_one_or_none()
+            
+            if not admin:
+                admin_username = os.getenv("ADMIN_USERNAME", "admin")
+                admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+                admin_email = os.getenv("ADMIN_EMAIL", "admin@example.com")
+                
+                hashed_password = auth.get_password_hash(admin_password)
+                admin_user = UserDB(
+                    username=admin_username,
+                    email=admin_email,
+                    hashed_password=hashed_password,
+                    is_admin=True,
+                    is_active=True
+                )
+                session.add(admin_user)
+                await session.commit()
+                print(f"Администратор создан: {admin_username}")
+            else:
+                print(f"Администратор уже существует: {admin.username}")
+        except Exception as e:
+            print(f"Ошибка создания администратора: {e}")
+
+@app.get("/auth/verify")
+async def verify_token(current_user = Depends(auth.get_current_user)):
+    return {
+        "username": current_user.username,
+        "is_admin": current_user.is_admin,
+        "email": current_user.email
+    }
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
@@ -64,6 +117,8 @@ async def home():
                 <a href="/my-reviews-page">Мои отзывы</a>
                 <a href="#" onclick="logout()" class="logout-btn">Выйти</a>
             </div>
+                        
+            <div id="adminPanel" style="margin-top: 20px;"></div>
             
             <script>
                 function isTokenExpired(token) {
@@ -78,27 +133,56 @@ async def home():
                 }
                 
                 const token = localStorage.getItem('access_token');
+                
                 if (token && !isTokenExpired(token)) {
                     try {
                         const payload = JSON.parse(atob(token.split('.')[1]));
                         document.body.innerHTML += '<p style="color: green; padding: 10px; background: #f0f8f0; border-radius: 4px;">Вы авторизованы как: ' + payload.sub + '</p>';
                         
-                        const nav = document.querySelector('.nav');
-                        const adminLink = document.createElement('a');
-                        adminLink.href = '/admin-panel';
-                        adminLink.className = 'admin-link';
-                        adminLink.textContent = 'Панель администратора';
-                        nav.appendChild(adminLink);
+                        // Проверяем, является ли пользователь администратором
+                        checkAdminStatus();
                     } catch (e) {}
                 } else if (token && isTokenExpired(token)) {
                     localStorage.removeItem('access_token');
                     document.body.innerHTML += '<p style="color: red; padding: 10px; background: #f8d7da; border-radius: 4px;">Сессия истекла. Пожалуйста, войдите снова.</p>';
                 }
                 
+                async function checkAdminStatus() {
+                    const token = localStorage.getItem('access_token');
+                    if (token && !isTokenExpired(token)) {
+                        try {
+                            const response = await fetch('/auth/verify', {
+                                headers: {
+                                    'Authorization': 'Bearer ' + token
+                                }
+                            });
+                            
+                            if (response.ok) {
+                                const user = await response.json();
+                                if (user.is_admin) {
+                                    const adminPanel = document.getElementById('adminPanel');
+                                    adminPanel.innerHTML = `
+                                        <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; border-left: 4px solid #3498db;">
+                                            <h3 style="margin-top: 0; color: #3498db;">Панель администратора</h3>
+                                            <a href="/admin-panel" class="admin-link" style="display: inline-block; padding: 8px 15px; background: #3498db; color: white; text-decoration: none; border-radius: 4px;">
+                                                Управление отзывами
+                                            </a>
+                                        </div>
+                                    `;
+                                }
+                            }
+                        } catch (e) {
+                            console.error('Ошибка проверки прав:', e);
+                        }
+                    }
+                }
+                
                 function logout() {
                     localStorage.removeItem('access_token');
                     window.location.href = '/';
                 }
+                
+                checkAdminStatus();
             </script>
         </body>
     </html>
@@ -714,12 +798,12 @@ async def movies_page():
                 async function loadAllMovies() {
                     try {
                         const response = await fetch('/movies/?limit=100');
-                        if (!response.ok) throw new Error('Ошибка');
+                        if (!response.ok) throw new Error('Ошибка загрузки фильмов');
                         
                         const movies = await response.json();
                         displayMovies(movies);
                     } catch (error) {
-                        document.getElementById('moviesList').innerHTML = '<div class="message error">Ошибка</div>';
+                        document.getElementById('moviesList').innerHTML = '<div class="message error">Ошибка загрузки фильмов</div>';
                     }
                 }
                 
@@ -733,12 +817,12 @@ async def movies_page():
                     
                     try {
                         const response = await fetch(url);
-                        if (!response.ok) throw new Error('Ошибка');
+                        if (!response.ok) throw new Error('Ошибка поиска');
                         
                         const movies = await response.json();
                         displayMovies(movies);
                     } catch (error) {
-                        document.getElementById('moviesList').innerHTML = '<div class="message error">Ошибка</div>';
+                        document.getElementById('moviesList').innerHTML = '<div class="message error">Ошибка поиска</div>';
                     }
                 }
                 
@@ -766,6 +850,10 @@ async def movies_page():
                                 <p><strong>Режиссёр:</strong> ${movie.director}</p>
                                 <p><strong>Год:</strong> ${movie.year || '—'}</p>
                                 <p><strong>Рейтинг:</strong> ${movie.rating?.toFixed(1) || '0.0'}/10</p>
+                                <div id="reviews-${movie.id}" style="margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px;">
+                                    <strong>Отзывы:</strong>
+                                    <div id="reviews-list-${movie.id}">Загрузка отзывов...</div>
+                                </div>
                                 <button onclick="openReviewModal(${movie.id}, '${movie.title.replace(/'/g, "\\'")}')">Оставить отзыв</button>
                             </div>
                         `;
@@ -773,6 +861,52 @@ async def movies_page():
                     
                     html += '</div>';
                     document.getElementById('moviesList').innerHTML = html;
+                    
+                    movies.forEach(movie => {
+                        loadMovieReviews(movie.id);
+                    });
+                }
+                
+                async function loadMovieReviews(movieId) {
+                    try {
+                        console.log(`Загрузка отзывов для фильма ${movieId}`);
+                        const response = await fetch(`/movies/${movieId}/reviews`);
+                        
+                        if (!response.ok) {
+                            console.error(`Ошибка HTTP: ${response.status}`);
+                            document.getElementById(`reviews-list-${movieId}`).innerHTML = 
+                                '<p style="color: #888; font-style: italic;">Ошибка загрузки отзывов</p>';
+                            return;
+                        }
+                        
+                        const reviews = await response.json();
+                        console.log(`Получено отзывов: ${reviews.length}`, reviews);
+                        
+                        const container = document.getElementById(`reviews-list-${movieId}`);
+                        
+                        if (reviews.length === 0) {
+                            container.innerHTML = '<p style="color: #666;">Нет отзывов</p>';
+                            return;
+                        }
+                        
+                        let html = '<ul style="padding-left: 15px; margin: 5px 0;">';
+                        reviews.forEach(review => {
+                            html += `
+                                <li>
+                                    <strong>${review.username || 'Пользователь'}:</strong> 
+                                    ${review.rating}/5 - ${review.comment || 'Без комментария'}
+                                    <br>
+                                    <small style="color: #888;">${new Date(review.created_at).toLocaleDateString()}</small>
+                                </li>
+                            `;
+                        });
+                        html += '</ul>';
+                        container.innerHTML = html;
+                    } catch (error) {
+                        console.error('Ошибка при загрузке отзывов:', error);
+                        document.getElementById(`reviews-list-${movieId}`).innerHTML = 
+                            '<p style="color: #888; font-style: italic;">Ошибка загрузки отзывов</p>';
+                    }
                 }
                 
                 function openReviewModal(movieId, movieTitle) {
@@ -819,6 +953,7 @@ async def movies_page():
                                 '<div class="message success">Отзыв добавлен</div>';
                             setTimeout(() => {
                                 closeReviewModal();
+                                loadMovieReviews(movieId);
                             }, 1500);
                         } else {
                             document.getElementById('reviewMessage').innerHTML = 
@@ -852,7 +987,7 @@ async def admin_panel_page():
             <style>
                 body { font-family: Arial, sans-serif; max-width: 1400px; margin: 0 auto; padding: 20px; }
                 .section { margin: 30px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
-                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 20px; }
                 .card { border: 1px solid #eee; padding: 15px; border-radius: 5px; }
                 button { background: #3498db; color: white; padding: 10px 20px; border: none; cursor: pointer; margin: 5px; border-radius: 4px; }
                 .delete-btn { background: #e74c3c; }
@@ -872,11 +1007,6 @@ async def admin_panel_page():
                 .message { padding: 10px; margin: 10px 0; border-radius: 4px; }
                 .success { background: #d4edda; color: #155724; }
                 .error { background: #f8d7da; color: #721c24; }
-                .tab { overflow: hidden; border: 1px solid #ccc; background-color: #f1f1f1; }
-                .tab button { background-color: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 14px 16px; transition: 0.3s; }
-                .tab button:hover { background-color: #ddd; }
-                .tab button.active { background-color: #ccc; }
-                .tabcontent { display: none; padding: 6px 12px; border: 1px solid #ccc; border-top: none; }
             </style>
         </head>
         <body>
@@ -888,167 +1018,94 @@ async def admin_panel_page():
             
             <div id="authInfo"></div>
             
-            <div class="tab">
-                <button class="tablinks" onclick="openTab(event, 'Reviews')">Отзывы</button>
-                <button class="tablinks" onclick="openTab(event, 'Movies')">Фильмы</button>
-                <button class="tablinks" onclick="openTab(event, 'Users')">Пользователи</button>
-            </div>
-            
-            <div id="Reviews" class="tabcontent">
+            <div class="section">
                 <h3>Все отзывы</h3>
-                <div id="allReviews">Загрузка...</div>
-            </div>
-            
-            <div id="Movies" class="tabcontent">
-                <h3>Все фильмы</h3>
-                <div id="allMovies">Загрузка...</div>
-            </div>
-            
-            <div id="Users" class="tabcontent">
-                <h3>Все пользователи</h3>
-                <div id="allUsers">Загрузка...</div>
+                <div id="allReviews"></div>
             </div>
             
             <script>
-                const token = localStorage.getItem('access_token');
-                const authInfo = document.getElementById('authInfo');
-                
-                if (!token) {
-                    authInfo.innerHTML = '<div class="message error">Доступ запрещен</div>';
-                } else {
-                    loadAllReviews();
-                    document.getElementsByClassName('tablinks')[0].click();
+                function isTokenExpired(token) {
+                    try {
+                        const payload = JSON.parse(atob(token.split('.')[1]));
+                        const exp = payload.exp * 1000;
+                        const now = Date.now();
+                        return now >= exp;
+                    } catch (e) {
+                        return true;
+                    }
                 }
-                
+
+                async function initAdminPanel() {
+                    const token = localStorage.getItem('access_token');
+                    const authInfo = document.getElementById('authInfo');
+
+                    if (!token) {
+                        authInfo.innerHTML = '<div class="message error">Требуется авторизация</div>';
+                        return;
+                    }
+
+                    if (isTokenExpired(token)) {
+                        localStorage.removeItem('access_token');
+                        authInfo.innerHTML = '<div class="message error">Сессия истекла. Пожалуйста, войдите снова.</div>';
+                        return;
+                    }
+
+                    await loadAllReviews();
+                }
+
                 async function loadAllReviews() {
                     try {
-                        const response = await fetch('/admin/reviews/?limit=50', {
+                        const token = localStorage.getItem('access_token'); // получаем токен заново внутри функции
+                        const response = await fetch('/admin/reviews-with-details/?limit=100', {
                             headers: {
                                 'Authorization': 'Bearer ' + token
                             }
                         });
-                        
-                        if (!response.ok) throw new Error('Ошибка');
-                        
+                        if (!response.ok) {
+                            if (response.status === 403) {
+                                document.getElementById('authInfo').innerHTML = '<div class="message error">Недостаточно прав для доступа к панели администратора</div>';
+                                return;
+                            }
+                            throw new Error('Ошибка загрузки отзывов');
+                        }
                         const reviews = await response.json();
-                        
                         if (reviews.length === 0) {
                             document.getElementById('allReviews').innerHTML = '<p>Нет отзывов</p>';
                             return;
                         }
-                        
                         let html = '<div class="grid">';
-                        
                         reviews.forEach(review => {
                             html += `
                                 <div class="card">
-                                    <h4>Отзыв #${review.id}</h4>
-                                    <p><strong>Фильм ID:</strong> ${review.movie_id}</p>
-                                    <p><strong>Автор ID:</strong> ${review.user_id}</p>
+                                    <h4>${review.movie_title}</h4>
+                                    <p><strong>Автор:</strong> ${review.username} (${review.user_email})</p>
                                     <p><strong>Рейтинг:</strong> ${review.rating}/5</p>
+                                    <p><strong>Комментарий:</strong> ${review.comment || 'Нет комментария'}</p>
                                     <p><strong>Дата:</strong> ${new Date(review.created_at).toLocaleString()}</p>
-                                    <button onclick="deleteReview(${review.id})" class="delete-btn">Удалить</button>
+                                    <button onclick="deleteReview(${review.id})" class="delete-btn">Удалить отзыв</button>
                                 </div>
                             `;
                         });
-                        
                         html += '</div>';
                         document.getElementById('allReviews').innerHTML = html;
                     } catch (error) {
-                        document.getElementById('allReviews').innerHTML = '<div class="message error">Ошибка</div>';
+                        document.getElementById('allReviews').innerHTML = '<div class="message error">Ошибка загрузки отзывов</div>';
+                        console.error('Ошибка загрузки отзывов:', error);
                     }
                 }
-                
-                async function loadAllMovies() {
-                    try {
-                        const response = await fetch('/admin/movies/?limit=50', {
-                            headers: {
-                                'Authorization': 'Bearer ' + token
-                            }
-                        });
-                        
-                        if (!response.ok) throw new Error('Ошибка');
-                        
-                        const movies = await response.json();
-                        
-                        if (movies.length === 0) {
-                            document.getElementById('allMovies').innerHTML = '<p>Нет фильмов</p>';
-                            return;
-                        }
-                        
-                        let html = '<div class="grid">';
-                        
-                        movies.forEach(movie => {
-                            const photoUrl = movie.photo_url || '/static/default_movie.jpg';
-                            
-                            html += `
-                                <div class="card">
-                                    <h4>${movie.title}</h4>
-                                    <img src="${photoUrl}" alt="${movie.title}" style="max-width: 100%; height: 150px; object-fit: cover;" onerror="this.src='/static/default_movie.jpg'">
-                                    <p><strong>ID:</strong> ${movie.id}</p>
-                                    <p><strong>Рейтинг:</strong> ${movie.rating?.toFixed(1) || '0.0'}/10</p>
-                                    <button onclick="deleteMovie(${movie.id})" class="delete-btn">Удалить</button>
-                                </div>
-                            `;
-                        });
-                        
-                        html += '</div>';
-                        document.getElementById('allMovies').innerHTML = html;
-                    } catch (error) {
-                        document.getElementById('allMovies').innerHTML = '<div class="message error">Ошибка</div>';
-                    }
-                }
-                
-                async function loadAllUsers() {
-                    try {
-                        const response = await fetch('/admin/users/?limit=50', {
-                            headers: {
-                                'Authorization': 'Bearer ' + token
-                            }
-                        });
-                        
-                        if (!response.ok) throw new Error('Ошибка');
-                        
-                        const users = await response.json();
-                        
-                        if (users.length === 0) {
-                            document.getElementById('allUsers').innerHTML = '<p>Нет пользователей</p>';
-                            return;
-                        }
-                        
-                        let html = '<div class="grid">';
-                        
-                        users.forEach(user => {
-                            html += `
-                                <div class="card">
-                                    <h4>${user.username}</h4>
-                                    <p><strong>ID:</strong> ${user.id}</p>
-                                    <p><strong>Email:</strong> ${user.email}</p>
-                                    <p><strong>Админ:</strong> ${user.is_admin ? 'Да' : 'Нет'}</p>
-                                </div>
-                            `;
-                        });
-                        
-                        html += '</div>';
-                        document.getElementById('allUsers').innerHTML = html;
-                    } catch (error) {
-                        document.getElementById('allUsers').innerHTML = '<div class="message error">Ошибка</div>';
-                    }
-                }
-                
+
                 async function deleteReview(reviewId) {
-                    if (!confirm('Удалить отзыв?')) return;
-                    
+                    if (!confirm('Удалить этот отзыв?')) return;
                     try {
+                        const token = localStorage.getItem('access_token');
                         const response = await fetch(`/admin/reviews/${reviewId}`, {
                             method: 'DELETE',
                             headers: {
                                 'Authorization': 'Bearer ' + token
                             }
                         });
-                        
                         if (response.ok) {
-                            alert('Отзыв удален');
+                            alert('Отзыв успешно удален');
                             loadAllReviews();
                         } else {
                             const error = await response.json();
@@ -1058,51 +1115,13 @@ async def admin_panel_page():
                         alert('Ошибка сети');
                     }
                 }
-                
-                async function deleteMovie(movieId) {
-                    if (!confirm('Удалить фильм?')) return;
-                    
-                    try {
-                        const response = await fetch(`/admin/movies/${movieId}`, {
-                            method: 'DELETE',
-                            headers: {
-                                'Authorization': 'Bearer ' + token
-                            }
-                        });
-                        
-                        if (response.ok) {
-                            alert('Фильм удален');
-                            loadAllMovies();
-                        } else {
-                            const error = await response.json();
-                            alert('Ошибка: ' + error.detail);
-                        }
-                    } catch (error) {
-                        alert('Ошибка сети');
-                    }
-                }
-                
-                function openTab(evt, tabName) {
-                    var i, tabcontent, tablinks;
-                    tabcontent = document.getElementsByClassName("tabcontent");
-                    for (i = 0; i < tabcontent.length; i++) {
-                        tabcontent[i].style.display = "none";
-                    }
-                    tablinks = document.getElementsByClassName("tablinks");
-                    for (i = 0; i < tablinks.length; i++) {
-                        tablinks[i].className = tablinks[i].className.replace(" active", "");
-                    }
-                    document.getElementById(tabName).style.display = "block";
-                    evt.currentTarget.className += " active";
-                    
-                    if (tabName === 'Reviews') loadAllReviews();
-                    if (tabName === 'Movies') loadAllMovies();
-                    if (tabName === 'Users') loadAllUsers();
-                }
+
+                initAdminPanel();
             </script>
         </body>
     </html>
     """)
+
 
 @app.get("/my-reviews-page", response_class=HTMLResponse)
 async def my_reviews_page():
@@ -1167,13 +1186,13 @@ async def my_reviews_page():
                 
                 async function loadMyReviews() {
                     try {
-                        const response = await fetch('/user/reviews/', {
+                        const response = await fetch('/user/reviews-with-details/', {
                             headers: {
                                 'Authorization': 'Bearer ' + token
                             }
                         });
                         
-                        if (!response.ok) throw new Error('Ошибка');
+                        if (!response.ok) throw new Error('Ошибка загрузки отзывов');
                         
                         const reviews = await response.json();
                         
@@ -1187,10 +1206,11 @@ async def my_reviews_page():
                         reviews.forEach(review => {
                             html += `
                                 <div class="review-card" id="review-${review.id}">
-                                    <h3>Фильм ID: ${review.movie_id}</h3>
+                                    <h3>${review.movie_title}</h3>
+                                    <p><strong>Режиссёр:</strong> ${review.movie_director}</p>
                                     <div id="review-view-${review.id}">
-                                        <p><strong>Рейтинг:</strong> ${review.rating}/5</p>
-                                        <p><strong>Комментарий:</strong> ${review.comment || 'Без комментария'}</p>
+                                        <p><strong>Мой рейтинг:</strong> ${review.rating}/5</p>
+                                        <p><strong>Мой комментарий:</strong> ${review.comment || 'Без комментария'}</p>
                                         <p><strong>Дата:</strong> ${new Date(review.created_at).toLocaleDateString()}</p>
                                         <button onclick="startEditReview(${review.id})" class="edit-btn">Редактировать</button>
                                         <button onclick="deleteMyReview(${review.id})" class="delete-btn">Удалить</button>
@@ -1219,7 +1239,7 @@ async def my_reviews_page():
                         html += '</div>';
                         document.getElementById('reviewsList').innerHTML = html;
                     } catch (error) {
-                        document.getElementById('reviewsList').innerHTML = '<div class="message error">Ошибка</div>';
+                        document.getElementById('reviewsList').innerHTML = '<div class="message error">Ошибка загрузки отзывов</div>';
                     }
                 }
                 

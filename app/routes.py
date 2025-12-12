@@ -4,7 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from app import models, auth, crud
 from app.database import get_db
-from app.schemas import MovieDB, ReviewDB
+from app.schemas import MovieDB, ReviewDB, UserDB
+from sqlalchemy.orm import selectinload
 
 router = APIRouter()
 
@@ -133,7 +134,7 @@ async def get_recommendations(
            response_model=models.ReviewResponse,
            summary="Обновить отзыв",
            description="Обновляет отзыв на фильм. Пользователь может обновлять только свои отзывы.")
-async def update_review(
+async def update_user_review(
     review_id: int,
     review_update: models.ReviewUpdate,
     current_user = Depends(auth.get_current_user),
@@ -151,7 +152,7 @@ async def update_review(
 @router.delete("/reviews/{review_id}",
               summary="Удалить отзыв",
               description="Удаляет отзыв на фильм. Пользователь может удалять свои отзывы, администратор - любые.")
-async def delete_review(
+async def delete_user_review(
     review_id: int,
     current_user = Depends(auth.get_current_user),
     db: AsyncSession = Depends(get_db)
@@ -164,3 +165,120 @@ async def delete_review(
         )
     
     return await crud.delete_review(db, review_id)
+
+@router.get("/admin/reviews-with-details/", 
+           response_model=List[models.ReviewWithDetailsResponse],
+           summary="Получить все отзывы с деталями (админ)",
+           description="Возвращает все отзывы с детальной информацией о фильмах и пользователях. Только для администраторов.")
+async def get_all_reviews_with_details_admin(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    current_user = Depends(auth.get_current_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(ReviewDB)
+        .options(selectinload(ReviewDB.user), selectinload(ReviewDB.movie))
+        .order_by(ReviewDB.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    
+    reviews = result.scalars().all()
+    
+    reviews_data = []
+    for review in reviews:
+        review_response = models.ReviewWithDetailsResponse(
+            id=review.id,
+            movie_id=review.movie_id,
+            user_id=review.user_id,
+            rating=review.rating,
+            comment=review.comment,
+            created_at=review.created_at,
+            username=review.user.username if review.user else "Неизвестный",
+            user_email=review.user.email if review.user else None,
+            movie_title=review.movie.title if review.movie else "Неизвестный фильм",
+            movie_director=review.movie.director if review.movie else "Неизвестный режиссер"
+        )
+        reviews_data.append(review_response)
+    
+    return reviews_data
+
+@router.delete("/admin/reviews/{review_id}",
+              summary="Удалить любой отзыв (админ)",
+              description="Удаляет отзыв на фильм. Только для администраторов.")
+async def admin_delete_review(
+    review_id: int,
+    current_user = Depends(auth.get_current_admin_user),
+    db: AsyncSession = Depends(get_db)
+):
+    return await crud.delete_review(db, review_id)
+
+@router.get("/user/reviews-with-details/", 
+           response_model=List[models.ReviewWithDetailsResponse],
+           summary="Получить отзывы пользователя с деталями",
+           description="Возвращает отзывы текущего пользователя с детальной информацией о фильмах.")
+async def get_user_reviews_with_details(
+    current_user = Depends(auth.get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    from sqlalchemy.orm import selectinload
+    
+    result = await db.execute(
+        select(ReviewDB, MovieDB)
+        .join(MovieDB, ReviewDB.movie_id == MovieDB.id)
+        .where(ReviewDB.user_id == current_user.id)
+        .order_by(ReviewDB.created_at.desc())
+    )
+    
+    reviews_data = []
+    for review, movie in result.all():
+        review_response = models.ReviewWithDetailsResponse(
+            id=review.id,
+            movie_id=review.movie_id,
+            user_id=review.user_id,
+            rating=review.rating,
+            comment=review.comment,
+            created_at=review.created_at,
+            username=current_user.username,
+            user_email=current_user.email,
+            movie_title=movie.title,
+            movie_director=movie.director
+        )
+        reviews_data.append(review_response)
+    
+    return reviews_data
+
+@router.get("/movies/{movie_id}/reviews", 
+           response_model=List[models.ReviewWithUserResponse],
+           summary="Получить отзывы на фильм",
+           description="Возвращает все отзывы на указанный фильм.")
+async def get_movie_reviews(
+    movie_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    from sqlalchemy.orm import selectinload
+    
+    result = await db.execute(
+        select(ReviewDB)
+        .options(selectinload(ReviewDB.user))
+        .where(ReviewDB.movie_id == movie_id)
+    )
+    
+    reviews = result.scalars().all()
+    
+    review_responses = []
+    for review in reviews:
+        review_response = models.ReviewWithUserResponse(
+            id=review.id,
+            movie_id=review.movie_id,
+            user_id=review.user_id,
+            rating=review.rating,
+            comment=review.comment,
+            created_at=review.created_at,
+            username=review.user.username,
+            user_email=review.user.email
+        )
+        review_responses.append(review_response)
+    
+    return review_responses

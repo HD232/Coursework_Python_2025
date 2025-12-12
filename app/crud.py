@@ -185,14 +185,20 @@ async def create_review(
     return db_review
 
 async def get_movie_reviews(db: AsyncSession, movie_id: int):
+    from sqlalchemy.orm import selectinload
     result = await db.execute(
-        select(ReviewDB).where(ReviewDB.movie_id == movie_id)
+        select(ReviewDB)
+        .options(selectinload(ReviewDB.user))
+        .where(ReviewDB.movie_id == movie_id)
     )
     return result.scalars().all()
 
 async def get_user_reviews(db: AsyncSession, user_id: int):
+    from sqlalchemy.orm import selectinload
     result = await db.execute(
-        select(ReviewDB).where(ReviewDB.user_id == user_id)
+        select(ReviewDB)
+        .options(selectinload(ReviewDB.movie))
+        .where(ReviewDB.user_id == user_id)
     )
     return result.scalars().all()
 

@@ -88,3 +88,12 @@ class ReviewWithUserResponse(ReviewResponse):
     
     class Config:
         from_attributes = True
+
+class ReviewWithDetailsResponse(ReviewResponse):
+    username: str
+    user_email: Optional[str]
+    movie_title: str
+    movie_director: str
+    
+    class Config:
+        from_attributes = True
